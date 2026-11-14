@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 运行产物（按需保留，可自行取消注释）
+# logs/*.csv
+# logs/*.png
+# calibration/snapshots/
