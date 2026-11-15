@@ -12,6 +12,7 @@
 """
 import argparse
 import glob
+import os
 import time
 from pathlib import Path
 
@@ -211,7 +212,8 @@ def _report(result):
 # ---------------------------------------------------------------- 模式二：实时抓拍
 def calibrate_from_camera(camera_id=config.CAMERA_ID, max_frames=20,
                           snapshot_dir=config.CALIB_SNAPSHOT_DIR):
-    cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+    backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_V4L2
+    cap = cv2.VideoCapture(camera_id, backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
     if not cap.isOpened():

@@ -74,9 +74,12 @@ python camera_calibration.py --mode images
 python main.py
 # 按键：q 退出 | s 保存截图 | r 重置滤波器
 
-# 3) 连真实相机
+# 3) 连真实相机（普通 UVC 摄像头）
 python main.py --source 0 --color green
 # 或实时抓拍标定：python camera_calibration.py --mode camera --camera 0 --max-frames 20
+# 注意：MV-CS016-10UC 是 U3V 工业相机，通常不走 /dev/videoX。
+#       若 --source 0 打不开，请用 tools/mvs_capture.py 采集视频/抓拍，
+#       再用 --source <视频> 或 --mode images 完成标定与演示。
 
 # 4) 无界面生成演示视频（服务器 / 录屏场景）
 python main.py --source data/armor_mvs.avi --no-show --video-out assets/demo_video.mp4
