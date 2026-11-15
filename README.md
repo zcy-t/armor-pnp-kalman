@@ -1,260 +1,239 @@
-# 装甲板识别 PnP 位姿解算与卡尔曼滤波（OpenCV 综合作业）
+# 装甲板识别 → PnP 位姿解算 → 卡尔曼滤波（OpenCV 综合作业）
 
-本项目使用 OpenCV 实现从二维图像中的装甲板识别，到三维空间定位，再到目标运动状态
-估计与预测的完整流程：
+完整流程：
 
 ```
 相机采集 → 装甲板识别 → 角点提取 → PnP 位姿解算 → 卡尔曼滤波 → 运动状态估计与位置预测
 ```
 
-对应作业四大模块：
+> **全部演示数据均为虚拟机内海康 MVS 采集的真实连续帧，不是模拟数据。**
+> 相机：MV-CS016-10UC（USB3.0 工业相机，1440×1080），固定相机、移动装甲板。
 
-| 模块 | 实现文件 | 核心 API |
+---
+
+## 一、作业要求对照
+
+| 作业要求 | 本项目实现 | 产物 |
 | --- | --- | --- |
-| 1. 相机标定 | `camera_calibration.py` | `findChessboardCorners` / `cornerSubPix` / `calibrateCamera` |
-| 2. 装甲板识别与角点获取 | `armor_detector.py` | `inRange` / `findContours` / `minAreaRect` |
-| 3. PnP 位姿解算 | `pnp_solver.py` | `solvePnP` / `Rodrigues` / `projectPoints` |
-| 4. 卡尔曼滤波与运动预测 | `kalman_filter.py` | 自行实现卡尔曼，另提供 `cv2.KalmanFilter` 版本 |
+| 1. 相机标定，采集不同位置/角度的棋盘格，保存内参与畸变 | `camera_calibration.py` + 29 张 MVS 实拍标定图（20 张角点有效） | `calibration/camera_params.npz` |
+| 2. 装甲板识别与四角点、顺序正确 | `armor_detector.py`：绿色灯条 HSV → 轮廓 → `minAreaRect` → 灯条配对 → LT/RT/RB/LB | `assets/demo_video.mp4`、`assets/demo_*.jpg` |
+| 3. 按实际尺寸建模，`solvePnP()` 实时输出 X/Y/Z 与距离 | `pnp_solver.py`：235×55 mm 三维模型点，与 2D 角点严格一一对应 | 每帧 `logs/pnp_log.csv` |
+| 4. 卡尔曼滤波 + 短时间运动预测，展示原始/滤波/预测 | `kalman_filter.py`（自实现 6 维匀速模型，另提供 `cv2.KalmanFilter` 版），`viz.py` 趋势图 | `logs/*_compare.png` |
+| 5. 实时显示识别结果、三维位置、距离与滤波后状态 | `main.py` 窗口模式 / 无界面录屏模式 | 演示视频与截图 |
+| 提交 1：完整代码上传 Git 仓库 | 本仓库 | https://github.com/zcy-t/armor-pnp-kalman |
+| 提交 2：运行截图或演示视频 | `assets/demo_video.mp4`（240 帧 / 10 s）、4 张运行截图 | 见 `assets/` |
+| 提交 3：改变装甲板位置与距离，对比滤波前后 | 真实片段中装甲板从 656 mm 移近到 473 mm，行程 183 mm | `logs/motion_analysis.png`、`logs/analysis_summary.txt` |
 
 ---
 
-## 一、项目结构
+## 二、环境
 
+- Python 3.9+（开发验证：Python 3.14 + OpenCV 5.0；虚拟机：Python 3.12 + OpenCV 4.10）
+- 依赖：`pip install -r requirements.txt`（opencv-python / numpy / matplotlib）
+- 采集端：VMware Ubuntu 虚拟机 + 海康 MVS 客户端 / MVS SDK
+
+```bash
+python selftest.py        # 一键自检：卡尔曼、标定、PnP 往返，应输出「全部自检通过」
+python run_all.py         # 一键复现：自检 → 标定 → 真实帧全流程 → 演示视频 → 分析图表
 ```
-armor_pnp_kalman/
-├── config.py               # 全局配置（路径、棋盘格、装甲板尺寸、噪声参数）
-├── camera_calibration.py   # 模块1：相机标定（文件夹/实时抓拍两种模式）
-├── armor_detector.py       # 模块2：颜色灯条法装甲板识别与四角点排序（含 YOLO 适配）
-├── pnp_solver.py           # 模块3：PnP 位姿、距离、欧拉角、坐标轴绘制
-├── kalman_filter.py        # 模块4：卡尔曼滤波（自实现 + OpenCV 两版本）
-├── viz.py                  # 实时趋势曲线（测量/滤波/预测）
-├── main.py                 # 主程序，串联完整流程，记录 CSV
-├── plot_data.py            # 读取 CSV，生成对比图与统计
-├── synthetic_test.py       # 合成数据端到端测试（无摄像头也能验证）
-├── selftest.py             # 一键自检（算法正确性）
-├── requirements.txt
-├── calibration/
-│   ├── calib_images/       # 批量标定图片放这里
-│   ├── snapshots/          # 实时抓拍图片
-│   └── camera_params.npz   # 标定结果（运行后生成）
-├── logs/                   # CSV 数据与分析图表
-└── assets/                 # 运行截图
-```
+
+`run_all.py` 不需要摄像头，直接使用仓库内 `data/` 的 MVS 真实视频即可完整跑通，
+满足「程序能够独立运行」。
 
 ---
 
-## 二、环境安装
+## 三、真实数据是怎么采集的（虚拟机中的 MVS）
 
-要求 Python 3.9+（已在 Python 3.14 + OpenCV 5.0 验证）。
-
-```bash
-pip install -r requirements.txt
-# 或
-pip install opencv-python numpy matplotlib
-```
-
-先运行一键自检，确认环境与算法正常：
+1. 相机通过 USB3 直通到 VMware 虚拟机（`/dev/bus/usb/...`，设备 `2bdf:0001 U3V MV-CS016-10UC`）。
+2. 在虚拟机内用 **MVS 客户端**采集：
+   - `calibration/calib_images/mvs_*.jpg`：13 张棋盘格抓拍（MVS 保存为 BMP，已转 JPG）；
+   - `data/calib_mvs.avi`：棋盘格多视角视频，用 `tools/prepare_calib_frames.py` 按视角差异自动挑出 16 帧，共同构成 29 张标定图；
+   - `data/armor_mvs.avi`：132 帧装甲板视频（47.67 fps），拍摄时移动装甲板改变位置与距离。
+3. 也可用 **MVS SDK** 直接取流（`tools/mvs_capture.py`）：
 
 ```bash
-python selftest.py
+# 虚拟机内
+sudo mount -t fuse.vmhgfs-fuse .host:/ /mnt/hgfs -o allow_other   # 挂载共享目录
+export MVCAM_COMMON_RUNENV=/opt/MVS/lib
+python3 tools/mvs_capture.py --frames 150 --out /mnt/hgfs/mvs_shots/armor/Video_live.avi
 ```
 
-看到 “全部自检通过” 即可继续。
+> MVS 图形客户端会独占相机。若报 `0x80000203`（MV_E_ACCESS_DENIED），
+> 先关闭 MVS 客户端再采集；完成后用 `/opt/MVS/bin/MVS.sh` 重新启动。
+> `assets/mvs_sdk_live_check.jpg` 是本次在虚拟机内通过 MVS SDK 实时取流验证的画面。
 
 ---
 
-## 三、运行步骤
-
-### 第 1 步：核对物理尺寸（重要）
-
-打开 `config.py`，用尺子实测并修改：
-
-- `SQUARE_SIZE_MM`：棋盘格**单个方格**的边长（mm）。
-- `ARMOR_WIDTH_MM` / `ARMOR_HEIGHT_MM`：装甲板实际宽高（mm）。
-- `CHESSBOARD_COLS / CHESSBOARD_ROWS`：棋盘格内角点，本项目标定板为 `(6, 9)`。
-
-> 内角点 = 格子数 − 1。你上传的标定板为 7 列 × 10 行格子，故内角点 (6, 9)。
-
-### 第 2 步：相机标定
-
-**方式 A —— 文件夹批量标定（推荐）**
-
-把不同位置、角度拍摄的棋盘格图片（建议 15~20 张）放入
-`calibration/calib_images/`，然后：
+## 四、分步运行
 
 ```bash
+# 1) 相机标定（用仓库内 MVS 实拍图，无需相机）
 python camera_calibration.py --mode images
-```
 
-**方式 B —— 实时抓拍标定**
+# 2) 实时窗口运行（默认读取 data/armor_mvs.avi）
+python main.py
+# 按键：q 退出 | s 保存截图 | r 重置滤波器
 
-```bash
-python camera_calibration.py --mode camera --camera 0 --max-frames 20
-# 空格抓拍，c 标定，q 退出；尽量覆盖画面四角与不同距离、倾角
-```
+# 3) 连真实相机
+python main.py --source 0 --color green
+# 或实时抓拍标定：python camera_calibration.py --mode camera --camera 0 --max-frames 20
 
-标定成功后会打印内参矩阵、畸变系数与重投影误差，并保存到
-`calibration/camera_params.npz`。重投影 RMS 误差一般应小于 0.5~1 px。
+# 4) 无界面生成演示视频（服务器 / 录屏场景）
+python main.py --source data/armor_mvs.avi --no-show --video-out assets/demo_video.mp4
 
-### 第 3 步：运行主程序
-
-```bash
-python main.py --source 0 --color red                 # 摄像头，红色装甲板
-python main.py --source 0 --color blue               # 蓝色装甲板
-python main.py --source test.mp4                     # 视频文件
-python main.py --source photo.jpg                    # 单张图片
-python main.py --filter opencv                       # 使用 OpenCV 版卡尔曼
-```
-
-运行时会弹出两个窗口：
-
-1. 主画面：装甲板框、四角点（LT/RT/RB/LB）、三维坐标轴、测量/滤波/预测的
-   XYZ 与距离、欧拉角、速度、帧率。
-2. 趋势图：X、Y、Z、距离四个通道下，原始测量（橙）、滤波（绿）、预测（红）。
-
-按键：`q` 退出 | `s` 保存截图 | `r` 重置滤波器。数据同时写入 `logs/pnp_log.csv`。
-
-### 第 4 步：数据分析与对比
-
-```bash
+# 5) 生成滤波前后对比图与数值分析
 python plot_data.py
-```
 
-生成 `logs/` 下的 `position_compare.png`、`distance_compare.png`、
-`jitter_compare.png`，并打印滤波前后的标准差与帧间抖动 RMS。
-
----
-
-## 四、各模块原理
-
-### 1. 相机标定
-
-针孔相机模型将三维点投影到像素平面：
-
-```
-s · [u v 1]^T = K · [R | t] · [X Y Z 1]^T
-        ┌ fx  0  cx ┐
-   K =  │ 0  fy  cy │      （内参矩阵）
-        └ 0   0   1 ┘
-```
-
-真实镜头存在径向畸变（k1, k2, k3）和切向畸变（p1, p2）。对棋盘格每个内角点，
-其三维坐标由方格尺寸精确已知，二维坐标由图像检测并做亚像素细化，
-`calibrateCamera` 通过最小化重投影误差，一次性求出内参 K 与畸变系数 D。
-本项目还会逐图计算重投影误差，用于剔除质量差的标定图。
-
-### 2. 装甲板识别与角点获取
-
-采用不依赖额外模型的传统视觉流程（可独立运行）：
-
-1. 转 HSV，按红/蓝色相阈值二值化（红色跨 0 度需两段合并），形态学闭运算连接断裂。
-2. `findContours` 提取轮廓，`minAreaRect` 拟合旋转矩形，按细长比、面积、
-   与竖直方向夹角筛选出灯条。
-3. 灯条两两配对：长度差、倾斜角差、中心连线水平角、装甲板宽高比均满足条件，
-   多目标时用评分贪心并保证每个灯条只使用一次。
-4. 由左右灯条的上下端点，按**固定顺序**输出四角点：
-
-```
-左上 LT → 右上 RT → 右下 RB → 左下 LB
-```
-
-若需复用课堂 YOLO 模型，可使用 `armor_detector.py` 中的 `YoloArmorDetector`
-（接口相同，需安装 `ultralytics` 并提供权重）。
-
-### 3. PnP 位姿解算
-
-以装甲板中心为原点、灯条所在平面为 z=0 建立物体坐标系，四个三维模型点与上面的
-二维角点严格一一对应：
-
-```
-LT(-w/2,-h/2,0)  RT(w/2,-h/2,0)  RB(w/2,h/2,0)  LB(-w/2,h/2,0)
-```
-
-`solvePnP` 据此求出旋转向量 `rvec` 和平移向量 `tvec`：
-
-- `tvec` 即装甲板中心在相机坐标系下的 **X、Y、Z**（单位 mm），Z 沿光轴方向。
-- 中心距离 `distance = ‖tvec‖₂`。
-- `Rodrigues` 把 rvec 转旋转矩阵，再分解出 roll/pitch/yaw 欧拉角。
-- `projectPoints` 重投影并计算像素误差，用于自检。
-
-相机坐标系：X 向右、Y 向下、Z 沿光轴向前。
-
-### 4. 卡尔曼滤波与运动预测
-
-采用匀速运动模型，状态 6 维、观测 3 维：
-
-```
-x = [px, py, pz, vx, vy, vz]^T        z = [px, py, pz]^T
-```
-
-每个周期执行标准卡尔曼五步：
-
-```
-预测:  x⁻ = F·x        P⁻ = F·P·Fᵀ + Q
-校正:  y = z − H·x⁻     S = H·P⁻·Hᵀ + R
-       K = P⁻·Hᵀ·S⁻¹    x = x⁻ + K·y     P = (I − K·H)·P⁻
-```
-
-- 状态转移矩阵 F 含 `F[:3,3:] = dt·I`，体现“位置 = 位置 + 速度·dt”。
-- 过程噪声 Q 使用连续白噪声加速度模型离散化，`KF_ACCEL_NOISE` 越大越能跟上机动。
-- 测量噪声 R 由 `KF_MEASURE_NOISE` 决定，越大越平滑。
-- **运动预测**：以当前位置、速度匀速外推 N 帧：`x_pred = x + v·(N·dt)`。
-- **目标丢失**：只做预测不校正，P 持续增大表示不确定度上升；丢失超过
-  `MAX_LOST_FRAMES` 帧自动重置。
-
-`kalman_filter.py` 同时提供基于 `cv2.KalmanFilter` 的 `OpenCVKalman3D`，
-主程序加 `--filter opencv` 即可切换，两者结果一致。
-
----
-
-## 五、滤波效果（合成数据验证）
-
-无摄像头时可运行端到端合成测试：
-
-```bash
+# 6) 可选：OpenCV 版卡尔曼；开发期合成数据验证（不用于最终演示）
+python main.py --filter opencv --no-show --video-out assets/demo_opencv.mp4
 python synthetic_test.py
 ```
 
-该测试用已知虚拟内参和一条已知三维轨迹（含正弦机动 + 匀速靠近 + 像素级检测噪声）
-生成红色灯条图像，再走完整流水线并与真值对比。一次典型结果：
-
-- 相对真值 RMSE：测量 20.9 mm → 滤波 17.6 mm，降低约 15%。
-- 距离/ Z 的帧间抖动 RMS：约 34 → 10.6，**抖动降低约 69%**。
-- 滤波曲线在紧贴真值的同时显著更平滑；预测线在近帧较准，拐点处匀速外推会偏离，
-  符合预期。
-
-> 注意：作业要求最终演示必须使用真实相机的连续帧数据，合成测试仅用于开发验证。
-> 含真实运动的通道，其整体标准差主要反映运动本身，应重点看 **jitter_RMS（帧间抖动）**
-> 是否下降，而非整体 std。
-
 ---
 
-## 六、作业提交指引
+## 五、相机标定结果
 
-1. **上传 Git 仓库**
+`calibration/camera_params.npz`（1440×1080，20 张有效视角，重投影 RMS **0.819 px**）：
 
-```bash
-git init
-git add .
-git commit -m "feat: OpenCV 装甲板 PnP 位姿解算与卡尔曼滤波"
-git branch -M main
-git remote add origin <你的仓库地址>
-git push -u origin main
+```
+cameraMatrix = [[2805.45,    0.  , 663.17],
+                [   0.  , 2811.79, 557.63],
+                [   0.  ,    0.  ,   1.  ]]
+distCoeffs  = [-0.371, 0.334, 0.0037, 0.009, -7.525]   # k1,k2,p1,p2,k3
 ```
 
-2. **运行截图 / 演示视频**：运行 `main.py`，用 `s` 键截图，或录屏展示装甲板
-   识别框、四角点、三维坐标轴以及测量/滤波/预测数据。
-3. **改变位置与距离测试**：移动装甲板到不同 X/Y 位置、改变远近，观察 XYZ 与
-   距离变化；运行 `plot_data.py` 对比滤波前后曲线与 jitter_RMS。
+- 各视图重投影误差 0.479 ~ 1.249 px。
+- 标定图与 PnP 视频来自**同一台相机、同一分辨率**，符合「相机标定参数必须与实际相机及图像分辨率对应」。
+- `main.py` 通过 `getOptimalNewCameraMatrix` + `initUndistortRectifyMap` 做去畸变，PnP 使用校正后的内参、畸变置零。
+- 早期只用 5 张图时得到 `k3≈-133`，去畸变会把画面压缩到角落、识别框跑偏；补足到 20 张视角后畸变系数回归正常，这一步对结果影响很大。
 
 ---
 
-## 七、常见问题
+## 六、装甲板尺寸与 2D/3D 点对应
 
-- **找不到标定参数**：主程序会用近似内参并警告，仅用于流程验证，请先完成标定。
-- **检测不到装甲板**：调整 `config.py` 中 `LIGHT_MIN_AREA`、`LIGHT_MIN_RATIO`
-  以及 `armor_detector.py` 顶部 HSV 阈值；保证光照均匀、灯条完整入镜。
-- **滤波太滞后 / 太抖**：滞后则调大 `KF_ACCEL_NOISE` 或调小 `KF_MEASURE_NOISE`；
-  太抖则反向调整。
-- **距离整体偏差**：核对 `ARMOR_WIDTH_MM/ARMOR_HEIGHT_MM` 是否为实测尺寸，
-  并确认标定内参与当前分辨率一致。
+`pnp_solver.py` 中三维模型点顺序为 **左上 → 右上 → 右下 → 左下**，与
+`armor_detector.py` 输出的 `LT / RT / RB / LB` 严格一一对应：
+
+```
+[-117.5, -27.5, 0]  [ 117.5, -27.5, 0]  [ 117.5, 27.5, 0]  [-117.5, 27.5, 0]   (mm)
+```
+
+- 实测：两灯条中心距 **235 mm**，灯条长度 **55 mm**（`config.py`）。
+- 尺寸校验：真实正面帧中检测出的四边形 2D 宽高比约 **4.05~4.27**，与 235/55 = 4.27 一致；
+  用 235×55 建模时 `solvePnP` 的俯仰角约 -9°、重投影误差约 1 px；换成 235×45 时俯仰角变成 -29°、
+  重投影误差 14 px，说明尺寸必须与实物一致。
+- 误检测过滤：桌面绿色反光会被当成第二条灯条。`main.py::pick_best_armor` 用
+  「面积 + PnP 重投影误差 < 10 px」筛选真实装甲板，避免错误位姿污染滤波。
+
+---
+
+## 七、卡尔曼滤波与运动预测
+
+状态 `x = [px, py, pz, vx, vy, vz]^T`，观测 `z = [px, py, pz]^T`（来自每帧真实 `solvePnP` 结果）：
+
+```
+预测：x⁻ = F x,   P⁻ = F P Fᵀ + Q        F = [I  dt·I; 0  I]
+校正：K = P⁻Hᵀ(HP⁻Hᵀ+R)⁻¹,  x = x⁻ + K(z − Hx⁻),  P = (I−KH)P⁻
+外推：p(t+n·dt) = p + v·n·dt
+```
+
+- `Q` 采用连续白噪声加速度模型离散化，`R = σ²I`（σ=5 mm），过程噪声加速度 600 mm/s²。
+- 检测丢失时只做时间更新（`predict`），滤波器继续给出平滑状态与预测位置；连续丢失超过 30 帧才重置。
+- 同时提供 `OpenCVKalman3D`（`--filter opencv`），接口完全一致。
+
+---
+
+## 八、演示视频与运行截图
+
+`assets/demo_video.mp4`：1600×776，24 fps，共 240 帧（约 10 s），由真实 MVS 帧逐帧渲染：
+
+- 片头：相机型号、分辨率、标定 RMS、装甲板尺寸、流程说明；
+- 正片（132 帧）：装甲板识别框与 LT/RT/RB/LB 四角点、三维坐标轴、
+  `MEAS`（橙，原始测量）/ `FILT`（绿，滤波）/ `PRED`（红，预测）的 XYZ 与距离、
+  欧拉角、重投影误差、速度；右侧实时趋势图给出 X/Y/Z/距离四条曲线；
+- 片尾：检出率、距离变化范围、滤波前后抖动与下降比例。
+
+> 暗场画面在显示层做了伽马提亮（`DEMO_GAMMA=0.62`），**检测与 PnP 始终使用原始帧**，
+> 不影响数据真实性。
+
+运行截图：`assets/demo_00_f026.jpg` ~ `assets/demo_03_f104.jpg`。
+
+---
+
+## 九、结果分析（对应提交要求 3）
+
+`logs/pnp_log.csv` 记录了 132 帧的真实解算数据，`logs/analysis_summary.txt` 为数值结论：
+
+| 指标 | 数值 |
+| --- | --- |
+| 处理帧数 / 有效 PnP 解算帧 | 132 / **86**（65.2%） |
+| 装甲板距离变化 | **473.1 ~ 656.3 mm**，行程 **183.2 mm** |
+| 平均重投影误差 | 3.70 px |
+| 距离帧间抖动 RMS | 测量 **11.68 mm** → 滤波 **7.23 mm**，下降 **38.1%** |
+| Z 帧间抖动 RMS | 11.63 mm → 7.28 mm，下降 37.4% |
+| Y 帧间抖动 RMS | 18.22 mm → 4.76 mm，下降 73.9% |
+
+**改变装甲板位置/距离时的观察：**
+
+1. 装甲板由远及近移动时，`meas_z` / `meas_dist` 从约 656 mm 连续下降到约 473 mm，
+   X/Y 也随横向移动变化；`solvePnP` 输出的欧拉角与速度同步变化，说明位姿解算确实跟随真实运动。
+2. 原始测量曲线存在明显的逐帧毛刺（灯条角点抖动、局部反光）；滤波曲线明显平滑，
+   并且在装甲板部分移出画面、灯条只剩一条导致检测失败的区间（图中灰色带），
+   滤波器依靠时间更新继续给出位置与速度，重新捕获目标后再快速收敛——这正是卡尔曼滤波的价值。
+3. 预测曲线（红）始终领先滤波曲线一小段，体现基于估计速度的短时运动预测。
+
+图表：`logs/position_compare.png`、`logs/distance_compare.png`、
+`logs/jitter_compare.png`、`logs/motion_analysis.png`。
+
+---
+
+## 十、注意事项落实情况
+
+1. ✅ 标定参数与实际相机（MV-CS016-10UC）、分辨率（1440×1080）一一对应。
+2. ✅ 2D 角点与 3D 模型点顺序严格对应，装甲板尺寸按实测 235×55 mm 设置。
+3. ✅ 卡尔曼滤波使用连续帧的真实 `solvePnP` 结果；`synthetic_test.py` 仅用于开发期算法验证，
+   `logs/synthetic_log.csv` / `logs/synthetic_compare.png` 不参与最终演示。
+4. ✅ 固定相机、移动装甲板，符合「以固定相机为基础进行运动状态估计」。
+5. ✅ 程序可独立运行：`run_all.py` 无需摄像头即可复现全部产物；各模块均有注释说明作用。
+
+---
+
+## 十一、文件清单
+
+```
+config.py                 全局配置（真实相机/标定板/装甲板参数）
+camera_calibration.py     模块1：相机标定（文件夹 / 实时抓拍 / SB 角点回退）
+armor_detector.py         模块2：绿色灯条识别、灯条配对、四角点排序（含 YOLO 适配器）
+pnp_solver.py             模块3：solvePnP、距离、欧拉角、重投影误差、三维坐标轴
+kalman_filter.py          模块4：自实现卡尔曼 + cv2.KalmanFilter 两版本
+viz.py                    OpenCV 实时趋势曲线
+main.py                   主程序：实时窗口 / 无界面演示视频、CSV 记录
+plot_data.py              对比图、抖动统计、位置变化分析
+run_all.py                一键复现整份作业
+selftest.py               算法自检
+synthetic_test.py         开发期合成数据端到端测试（非最终演示）
+calibration/calib_images/ 29 张 MVS 实拍标定图
+calibration/camera_params.npz  相机内参、畸变系数、RMS
+data/armor_mvs.avi        真实装甲板连续帧（移动/变距离）
+data/calib_mvs.avi        真实棋盘格多视角视频
+assets/demo_video.mp4     演示视频
+assets/demo_*.jpg         运行截图
+assets/mvs_sdk_live_check.jpg  虚拟机 MVS SDK 实时取流验证
+logs/pnp_log.csv          每帧真实解算数据
+logs/*_compare.png        滤波前后对比图
+logs/motion_analysis.png  位置/距离变化分析
+logs/analysis_summary.txt 数值结论
+tools/mvs_capture.py      虚拟机内 MVS SDK 采集脚本
+tools/prepare_calib_frames.py  从棋盘格视频挑选多角度标定帧
+```
+
+---
+
+## 十二、常见问题
+
+- **画面整体发黑、看不到装甲板**：检查 MVS 曝光/增益；演示层可用 `--gamma 0.6` 提亮。
+- **识别框跑到画面角落**：多为标定文件分辨率不匹配或畸变系数异常，重新跑
+  `python camera_calibration.py --mode images`，或临时用 `--no-undistort` 对比。
+- **误检测 / 位姿跳变**：调小 `--max-reproj`；或调整 `config.py` 中 `HSV_RANGE['green']`
+  与灯条配对阈值，排除桌面反光。
+- **虚拟机里打不开相机**：MVS 客户端独占设备，关闭后再用 `tools/mvs_capture.py` 采集。

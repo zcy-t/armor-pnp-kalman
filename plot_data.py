@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-数据分析脚本：读取 main.py 记录的 CSV，
-绘制 原始测量 / 滤波 / 预测 对比图，并量化滤波前后的抖动与离散程度。
+数据分析脚本：读取 main.py 在 MVS 真实连续帧上记录的 CSV，
+绘制 原始测量 / 滤波 / 预测 对比图，量化滤波前后的抖动与离散程度，
+并输出改变装甲板位置/距离后的数据变化分析。
+
 运行：python plot_data.py
-产物：logs/ 下的 position_compare.png、distance_compare.png、jitter_compare.png
+产物：
+    logs/position_compare.png   X/Y/Z 三通道测量-滤波-预测对比
+    logs/distance_compare.png   中心距离对比
+    logs/jitter_compare.png     帧间抖动直方图（滤波前后）
+    logs/motion_analysis.png    位置/距离变化 + 丢帧时的预测保持
+    logs/analysis_summary.txt   数值结论（README 引用）
 """
 import argparse
 
@@ -24,7 +31,12 @@ def load(csv_path):
 
 
 def _series(data, col):
-    return data[col].astype(np.float64)
+    return np.asarray(data[col], dtype=np.float64)
+
+
+def _clean(v):
+    v = np.asarray(v, dtype=np.float64)
+    return v[~np.isnan(v)]
 
 
 def plot_positions(data, out):
@@ -34,13 +46,17 @@ def plot_positions(data, out):
              ("Y", "meas_y", "filt_y", "pred_y"),
              ("Z", "meas_z", "filt_z", "pred_z")]
     for ax, (name, m, f, p) in zip(axes, comps):
-        ax.plot(t, _series(data, m), color="#ff8c00", lw=1.2, label="measurement")
-        ax.plot(t, _series(data, f), color="#00a000", lw=1.6, label="filtered")
-        ax.plot(t, _series(data, p), color="#d62728", lw=1.0, ls="--", label="predicted")
+        ax.plot(t, _series(data, m), color="#ff8c00", lw=1.2,
+                label="measurement (PnP)")
+        ax.plot(t, _series(data, f), color="#00a000", lw=1.8,
+                label="filtered (Kalman)")
+        ax.plot(t, _series(data, p), color="#d62728", lw=1.0, ls="--",
+                label="predicted")
         ax.set_ylabel(f"{name} (mm)")
         ax.grid(alpha=0.3)
         ax.legend(loc="upper right", ncol=3, fontsize=8)
-    axes[0].set_title("3D Position: Measurement vs Filtered vs Predicted")
+    axes[0].set_title("3D Position: measurement vs filtered vs predicted "
+                      "(real MVS frames)")
     axes[-1].set_xlabel("time (s)")
     fig.tight_layout()
     fig.savefig(out, dpi=130)
@@ -52,15 +68,15 @@ def plot_distance(data, out):
     fig, ax = plt.subplots(figsize=(11, 4.2))
     md = _series(data, "meas_dist")
     fd = _series(data, "filt_dist")
-    # 预测距离由 pred xyz 计算
-    px, py, pz = _series(data, "pred_x"), _series(data, "pred_y"), _series(data, "pred_z")
+    px, py, pz = (_series(data, "pred_x"), _series(data, "pred_y"),
+                  _series(data, "pred_z"))
     pd_ = np.sqrt(px ** 2 + py ** 2 + pz ** 2)
     ax.plot(t, md, color="#ff8c00", lw=1.2, label="measurement")
-    ax.plot(t, fd, color="#00a000", lw=1.6, label="filtered")
+    ax.plot(t, fd, color="#00a000", lw=1.8, label="filtered")
     ax.plot(t, pd_, color="#d62728", lw=1.0, ls="--", label="predicted")
     ax.set_xlabel("time (s)")
     ax.set_ylabel("distance (mm)")
-    ax.set_title("Armor Center Distance")
+    ax.set_title("Armor Center Distance (armor moved during capture)")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=9)
     fig.tight_layout()
@@ -69,15 +85,13 @@ def plot_distance(data, out):
 
 
 def plot_jitter(data, out):
-    """相邻帧变化量（逐帧抖动）：滤波后应明显更集中在 0 附近。"""
+    """相邻帧变化量（逐帧抖动）直方图：滤波后应更集中在 0 附近。"""
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for ax, (m, f, title) in zip(axes, [
         ("meas_dist", "filt_dist", "distance frame-to-frame delta (mm)"),
         ("meas_z", "filt_z", "Z frame-to-frame delta (mm)")]):
-        dm = np.diff(_series(data, m))
-        df = np.diff(_series(data, f))
-        dm = dm[~np.isnan(dm)]
-        df = df[~np.isnan(df)]
+        dm = _clean(np.diff(_series(data, m)))
+        df = _clean(np.diff(_series(data, f)))
         ax.hist(dm, bins=30, alpha=0.55, color="#ff8c00", label="measurement")
         ax.hist(df, bins=30, alpha=0.55, color="#00a000", label="filtered")
         ax.set_title(title)
@@ -88,23 +102,86 @@ def plot_jitter(data, out):
     plt.close(fig)
 
 
-def report_stats(data):
-    """打印滤波前后标准差与帧间抖动 RMS。"""
-    print("=" * 66)
-    print(f"{'channel':<8}{'meas_std':>12}{'filt_std':>12}"
-          f"{'meas_jitter_RMS':>18}{'filt_jitter_RMS':>18}")
-    print("-" * 66)
+def plot_motion(data, out):
+    """展示改变装甲板位置/距离时的数据变化，以及检测丢失期间的预测保持。"""
+    t = data["timestamp"]
+    md = _series(data, "meas_dist")
+    fd = _series(data, "filt_dist")
+    det = _series(data, "detected")
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7.2), sharex=True)
+
+    ax = axes[0]
+    ax.plot(t, md, "o-", ms=3, color="#ff8c00", lw=1.0, label="measurement")
+    ax.plot(t, fd, color="#00a000", lw=2.0, label="filtered")
+    # 检测丢失区间用灰底标出：此时只有卡尔曼预测在推进
+    lost = det == 0
+    ax.fill_between(t, 0, 1, where=lost, transform=ax.get_xaxis_transform(),
+                    color="#888888", alpha=0.18,
+                    label="armor not detected (prediction only)")
+    d_clean = _clean(md)
+    ax.set_ylabel("distance (mm)")
+    ax.set_title(f"Changing armor position / distance: "
+                 f"{d_clean.min():.0f} - {d_clean.max():.0f} mm; "
+                 f"gray bands = detection gaps")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="lower right")
+
+    ax = axes[1]
+    dm = np.diff(md)
+    df = np.diff(fd)
+    ax.plot(t[1:], dm, color="#ff8c00", lw=1.0, label="measurement delta")
+    ax.plot(t[1:], df, color="#00a000", lw=1.4, label="filtered delta")
+    ax.axhline(0, color="#555555", lw=0.8)
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("frame delta (mm)")
+    ax.set_title("Frame-to-frame jitter: before vs after Kalman filter")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+
+
+def report_stats(data, out_txt):
+    lines = ["=" * 72,
+             "MVS real-frame PnP + Kalman analysis",
+             "=" * 72]
+    hdr = (f"{'channel':<8}{'meas_std':>12}{'filt_std':>12}"
+           f"{'meas_jitter_RMS':>18}{'filt_jitter_RMS':>18}{'drop':>10}")
+    lines.append(hdr)
+    lines.append("-" * 72)
+    summary = {}
     for name, m, f in [
         ("X", "meas_x", "filt_x"), ("Y", "meas_y", "filt_y"),
         ("Z", "meas_z", "filt_z"), ("DIST", "meas_dist", "filt_dist")]:
-        mv, fv = _series(data, m), _series(data, f)
-        mv, fv = mv[~np.isnan(mv)], fv[~np.isnan(fv)]
-        mj = np.sqrt(np.mean(np.diff(mv) ** 2)) if len(mv) > 1 else np.nan
-        fj = np.sqrt(np.mean(np.diff(fv) ** 2)) if len(fv) > 1 else np.nan
-        print(f"{name:<8}{mv.std():>12.2f}{fv.std():>12.2f}{mj:>18.2f}{fj:>18.2f}")
-    print("=" * 66)
-    print("说明：std 衡量整体离散度，jitter_RMS 衡量相邻帧抖动；"
-          "滤波后两项均应下降。")
+        mv, fv = _clean(_series(data, m)), _clean(_series(data, f))
+        mj = float(np.sqrt(np.mean(np.diff(mv) ** 2))) if len(mv) > 1 else np.nan
+        fj = float(np.sqrt(np.mean(np.diff(fv) ** 2))) if len(fv) > 1 else np.nan
+        drop = 100.0 * (1 - fj / mj) if mj > 1e-6 else 0.0
+        summary[name] = (float(mv.std()), float(fv.std()), mj, fj, drop)
+        lines.append(f"{name:<8}{mv.std():>12.2f}{fv.std():>12.2f}"
+                     f"{mj:>18.2f}{fj:>18.2f}{drop:>9.1f}%")
+    lines.append("-" * 72)
+    md = _clean(_series(data, "meas_dist"))
+    det = _series(data, "detected")
+    reproj = _clean(_series(data, "reproj_err"))
+    lines += [
+        f"total frames            : {len(data)}",
+        f"frames with PnP solution: {int(det.sum())}  "
+        f"({100.0 * det.sum() / len(data):.1f}%)",
+        f"distance range (mm)     : {md.min():.1f} ~ {md.max():.1f}",
+        f"distance travel (mm)    : {md.max() - md.min():.1f}",
+        f"mean reprojection error : {reproj.mean():.2f} px",
+        "",
+        "Note: measurement jitter is computed per solved frame; the filter",
+        "also keeps a smooth state through detection gaps (gray bands).",
+        "=" * 72,
+    ]
+    text = "\n".join(lines)
+    with open(out_txt, "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+    print(text)
+    return summary
 
 
 def main():
@@ -113,16 +190,21 @@ def main():
     args = ap.parse_args()
     data = load(args.csv)
 
-    out1 = config.LOG_DIR / "position_compare.png"
-    out2 = config.LOG_DIR / "distance_compare.png"
-    out3 = config.LOG_DIR / "jitter_compare.png"
-    plot_positions(data, out1)
-    plot_distance(data, out2)
-    plot_jitter(data, out3)
-    report_stats(data)
-    print("图表已保存：")
-    for o in (out1, out2, out3):
-        print(" -", o)
+    outs = {
+        "positions": config.LOG_DIR / "position_compare.png",
+        "distance": config.LOG_DIR / "distance_compare.png",
+        "jitter": config.LOG_DIR / "jitter_compare.png",
+        "motion": config.LOG_DIR / "motion_analysis.png",
+        "summary": config.LOG_DIR / "analysis_summary.txt",
+    }
+    plot_positions(data, outs["positions"])
+    plot_distance(data, outs["distance"])
+    plot_jitter(data, outs["jitter"])
+    plot_motion(data, outs["motion"])
+    report_stats(data, outs["summary"])
+    print("\n产物：")
+    for k, v in outs.items():
+        print(f" - {k}: {v}")
 
 
 if __name__ == "__main__":

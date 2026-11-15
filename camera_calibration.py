@@ -36,14 +36,37 @@ def build_object_points(board_cols, board_rows, square_mm):
 
 
 def find_chessboard(frame, board_cols, board_rows):
-    """检测棋盘格并做亚像素精细化，返回 (ok, corners)。"""
+    """检测棋盘格并做亚像素精细化，返回 (ok, corners)。
+
+    先用经典 findChessboardCorners（精度最高），失败再回退
+    findChessboardCornersSB（对噪声/模糊/低对比度更鲁棒，适合 MVS 实拍图）。
+    大图先降采样再回退检测，检测到后把坐标缩放回原始分辨率。
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
     ret, corners = cv2.findChessboardCorners(gray, (board_cols, board_rows), flags)
-    if not ret:
-        return False, None
-    corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), CRITERIA)
-    return True, corners
+    if ret:
+        corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), CRITERIA)
+        return True, corners
+
+    scale = 1.0
+    if max(gray.shape[:2]) > 2000:
+        scale = 0.5
+        small = cv2.resize(gray, None, fx=scale, fy=scale,
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = gray
+    try:
+        ret_sb, corners_sb = cv2.findChessboardCornersSB(
+            small, (board_cols, board_rows), None)
+        if ret_sb:
+            corners_sb = (corners_sb.astype(np.float32) / scale).reshape(-1, 1, 2)
+            corners_sb = cv2.cornerSubPix(gray, corners_sb, (11, 11),
+                                          (-1, -1), CRITERIA)
+            return True, corners_sb
+    except cv2.error:
+        pass
+    return False, None
 
 
 # ---------------------------------------------------------------- 核心标定
@@ -62,14 +85,20 @@ def calibrate(frames, board_cols, board_rows, square_mm):
             continue
         if image_size is None:
             image_size = (frame.shape[1], frame.shape[0])  # (w, h)
+        if (frame.shape[1], frame.shape[0]) != image_size:
+            print(f"[WARN] 标定图分辨率不一致，跳过: "
+                  f"{(frame.shape[1], frame.shape[0])} != {image_size}")
+            continue
         ok, corners = find_chessboard(frame, board_cols, board_rows)
         if ok:
             obj_points.append(objp)
             img_points.append(corners)
             used += 1
 
-    if used < 5:
-        raise RuntimeError(f"有效标定图过少（{used} 张），至少需要 5~10 张，请重新采集。")
+    if used < 3:
+        raise RuntimeError(f"有效标定图过少（{used} 张），至少需要 3 张，请重新采集。")
+    if used < 10:
+        print(f"[WARN] 有效标定图仅 {used} 张，畸变系数可能不稳定，建议补拍到 15 张以上。")
 
     # 内参初值留空，由 calibrateCamera 自动估计
     mtx = np.zeros((3, 3), np.float64)
@@ -146,19 +175,19 @@ def undistort_frame(frame, mtx, dist):
 
 # ---------------------------------------------------------------- 模式一：文件夹
 def calibrate_from_images(image_dir=config.CALIB_IMAGE_DIR):
-    paths = sorted(
-        glob.glob(str(Path(image_dir) / "*.jpg"))
-        + glob.glob(str(Path(image_dir) / "*.png"))
-        + glob.glob(str(Path(image_dir) / "*.jpeg"))
-    )
+    paths = []
+    for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp"):
+        paths.extend(glob.glob(str(Path(image_dir) / ext)))
+    paths = sorted(paths)
     if not paths:
-        raise FileNotFoundError(f"目录 {image_dir} 下没有找到标定图片(jpg/png)。")
+        raise FileNotFoundError(f"目录 {image_dir} 下没有找到标定图片(jpg/png/bmp)。")
     frames = []
     for p in paths:
         img = cv2.imread(p)
         if img is not None:
             frames.append(img)
-    print(f"共读取 {len(frames)} 张图片，开始标定...")
+    print(f"共读取 {len(frames)} 张图片（MVS 采集，"
+          f"分辨率 {config.FRAME_WIDTH}x{config.FRAME_HEIGHT}），开始标定...")
     result = calibrate(frames, config.CHESSBOARD_COLS, config.CHESSBOARD_ROWS,
                        config.SQUARE_SIZE_MM)
     _report(result)

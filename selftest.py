@@ -17,6 +17,8 @@ from pnp_solver import PnPSolver
 W, H = 1280, 720
 MTX0 = np.array([[800, 0, W / 2], [0, 800, H / 2], [0, 0, 1]], np.float64)
 DIST0 = np.zeros((5, 1))
+# 自检用合成棋盘格固定 25mm 方格，与真实标定板尺寸解耦，保证自检结果稳定
+SYNTH_SQUARE_MM = 25.0
 rng = np.random.default_rng(0)
 
 
@@ -38,7 +40,7 @@ def render_board(rvec, tvec):
     """按已知位姿渲染一张棋盘格灰度图。"""
     img = np.full((H, W), 255, np.uint8)
     cols, rows, sq = config.CHESSBOARD_COLS, config.CHESSBOARD_ROWS, \
-        config.SQUARE_SIZE_MM
+        SYNTH_SQUARE_MM
     # 形成 (cols x rows) 内角点需要 (cols+1) x (rows+1) 个方格
     for r in range(rows + 1):
         for c in range(cols + 1):
@@ -62,7 +64,7 @@ def test_calibration():
         tvec = np.array([30 * np.sin(k), 20 * np.cos(k), 620], np.float64)
         frames.append(cv2.cvtColor(render_board(rvec, tvec), cv2.COLOR_GRAY2BGR))
     result = calibrate(frames, config.CHESSBOARD_COLS, config.CHESSBOARD_ROWS,
-                       config.SQUARE_SIZE_MM)
+                       SYNTH_SQUARE_MM)
     m = result["mtx"]
     fx_err = abs(m[0, 0] - 800) / 800
     fy_err = abs(m[1, 1] - 800) / 800

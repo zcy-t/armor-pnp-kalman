@@ -1,0 +1,19 @@
+========================================================================
+MVS real-frame PnP + Kalman analysis
+========================================================================
+channel     meas_std    filt_std   meas_jitter_RMS   filt_jitter_RMS      drop
+------------------------------------------------------------------------
+X              14.32       15.83              4.60              2.94     36.1%
+Y              17.31       15.80             18.22              4.76     73.9%
+Z              49.09       46.51             11.63              7.28     37.4%
+DIST           48.83       46.32             11.68              7.23     38.1%
+------------------------------------------------------------------------
+total frames            : 132
+frames with PnP solution: 86  (65.2%)
+distance range (mm)     : 473.1 ~ 656.3
+distance travel (mm)    : 183.2
+mean reprojection error : 3.70 px
+
+Note: measurement jitter is computed per solved frame; the filter
+also keeps a smooth state through detection gaps (gray bands).
+========================================================================
